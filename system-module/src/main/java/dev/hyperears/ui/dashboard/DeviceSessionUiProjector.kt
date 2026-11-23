@@ -7,6 +7,7 @@ import dev.hyperears.integration.AdapterSnapshot
 import dev.hyperears.integration.HeadsetFormFactor
 import dev.hyperears.integration.NoiseMode
 import dev.hyperears.integration.AdapterResolution
+import dev.hyperears.integration.HuaweiDualConnectFeatureState
 import dev.hyperears.integration.PrivateTransportState
 import dev.hyperears.integration.ProtocolHandshakeState
 import dev.hyperears.integration.SystemProfileState
@@ -26,7 +27,21 @@ data class DeviceSessionUiModel(
     val miLinkLifecycle: List<DeviceLifecycleStage>,
     val metrics: List<DeviceMetric>,
     val noiseControl: NoiseControlUiModel?,
+    val dualConnect: DualConnectUiModel?,
     val sessionToken: String,
+)
+
+/** Peer roster for models that manage their own multi-device connections. */
+data class DualConnectUiModel(
+    val peers: List<DualConnectPeerUiModel>,
+    val enabled: Boolean,
+)
+
+data class DualConnectPeerUiModel(
+    val mac: String,
+    val name: String,
+    val connected: Boolean,
+    val playing: Boolean,
 )
 
 /** Generic control projection; concrete Adapter and protocol types never reach Compose. */
@@ -58,6 +73,7 @@ data class DeviceMetric(
 enum class DeviceMetricKind {
     READ_ONLY,
     NOISE_MODE,
+    DUAL_CONNECT,
 }
 
 /**
@@ -83,6 +99,7 @@ object DeviceSessionUiProjector {
             miLinkLifecycle = session.miLinkLifecycle,
             metrics = metrics(session, adapter),
             noiseControl = noiseControl(session, adapter),
+            dualConnect = dualConnect(session, adapter),
             sessionToken = session.sessionToken,
         )
     }
@@ -103,6 +120,33 @@ object DeviceSessionUiProjector {
                     !adapter.privateProtocolRequired ||
                         state.lifecycle.privateTransport == PrivateTransportState.CONNECTED
                 ),
+        )
+    }
+
+    /**
+     * Projects the headset's own paired-device roster.
+     *
+     * Switching requires the module to own the private channel: while a vendor app holds it the
+     * roster stays readable but every switch request is refused by the session.
+     */
+    private fun dualConnect(
+        session: DeviceSessionSnapshot,
+        adapter: AdapterSnapshot?,
+    ): DualConnectUiModel? {
+        adapter ?: return null
+        val roster = session.state.features.get<HuaweiDualConnectFeatureState>() ?: return null
+        if (roster.peers.isEmpty()) return null
+        val state = session.state
+        return DualConnectUiModel(
+            peers = roster.peers.map {
+                DualConnectPeerUiModel(it.mac, it.name, it.connected, it.playing)
+            },
+            enabled = state.connected &&
+                state.lifecycle.controlOwnership == ControlOwnership.MODULE &&
+                (
+                    !adapter.privateProtocolRequired ||
+                        state.lifecycle.privateTransport == PrivateTransportState.CONNECTED
+                    ),
         )
     }
 
@@ -179,6 +223,16 @@ object DeviceSessionUiProjector {
             add(DeviceMetric("左耳", battery.left.displayValue()))
             add(DeviceMetric("右耳", battery.right.displayValue()))
             add(DeviceMetric("充电盒", battery.case.displayValue()))
+        }
+        dualConnect(session, adapter)?.let { roster ->
+            val connected = roster.peers.count { it.connected }
+            add(
+                DeviceMetric(
+                    label = "设备",
+                    value = if (connected > 0) "${connected}/${roster.peers.size}" else "—",
+                    kind = DeviceMetricKind.DUAL_CONNECT,
+                ),
+            )
         }
         add(
             DeviceMetric(

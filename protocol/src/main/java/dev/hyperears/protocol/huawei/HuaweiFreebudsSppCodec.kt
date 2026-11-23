@@ -32,6 +32,11 @@ object HuaweiFreebudsSppCodec {
     const val CMD_NOISE_WRITE = 0x2B04
     const val CMD_NOISE_CHANGE_NOTIFY = 0x2B03
 
+    /** Dual-connection management: enumerate paired devices and act on one of them. */
+    const val CMD_DUAL_CONNECT_ENUMERATE = 0x2B31
+    const val CMD_DUAL_CONNECT_EXECUTE = 0x2B33
+    const val CMD_DUAL_CONNECT_CHANGE_NOTIFY = 0x2B36
+
     enum class NoiseMode(val wire: Int) {
         OFF(0x00),
         ANC(0x01),
@@ -65,6 +70,63 @@ object HuaweiFreebudsSppCodec {
         val mode: NoiseMode,
         val level: Int?,
     )
+
+    /**
+     * One dual-connection record from a `2B 31` enumeration frame.
+     *
+     * Parameter 2 is the total record count, 3 the record index, 4 the peer MAC, 5 the connection
+     * state (`9` means that peer is currently streaming), 7 the preferred flag, 8 auto-connect and
+     * 9 the peer name. The vendor app renders exactly this list.
+     */
+    data class DualConnectDevice(
+        val mac: String,
+        val name: String,
+        val connected: Boolean,
+        val playing: Boolean,
+        val preferred: Boolean,
+        val index: Int,
+        val total: Int,
+    )
+
+    /** Actions accepted by `2B 33`; the value travels as the first parameter type byte. */
+    enum class DualConnectAction(val wire: Int) {
+        CONNECT(1),
+        DISCONNECT(2),
+    }
+
+    /** Builds a `2B 31` enumeration request. */
+    val queryDualConnectDevices: ByteArray = packet(
+        CMD_DUAL_CONNECT_ENUMERATE,
+        listOf(1 to byteArrayOf()),
+    )
+
+    /** Builds a `2B 33` connect or disconnect request for one peer. */
+    fun dualConnectCommand(action: DualConnectAction, mac: String): ByteArray {
+        val address = mac.split(":").map { it.toInt(16).toByte() }.toByteArray()
+        require(address.size == 6) { "peer address must be six octets" }
+        return packet(CMD_DUAL_CONNECT_EXECUTE, listOf(action.wire to address))
+    }
+
+    /** Decodes one `2B 31` record; returns null when the frame is not an enumeration record. */
+    fun parseDualConnectFrame(bytes: ByteArray): DualConnectDevice? {
+        val frame = parseFrame(bytes) ?: return null
+        if (frame.command != CMD_DUAL_CONNECT_ENUMERATE) return null
+        val mac = frame.params[4]?.takeIf { it.size == 6 }?.joinToString(":") {
+            "%02X".format(it.toInt() and 0xFF)
+        } ?: return null
+        val total = frame.params[2]?.firstOrNull()?.unsigned() ?: return null
+        val index = frame.params[3]?.firstOrNull()?.unsigned() ?: return null
+        val connection = frame.params[5]?.firstOrNull()?.unsigned() ?: 0
+        return DualConnectDevice(
+            mac = mac,
+            name = frame.params[9]?.toString(Charsets.UTF_8)?.trim().orEmpty(),
+            connected = connection > 0,
+            playing = connection == 9,
+            preferred = frame.params[7]?.firstOrNull()?.unsigned() == 1,
+            index = index,
+            total = total,
+        )
+    }
 
     /** Raw decoded frame: command id plus parameters keyed by their TLV type byte. */
     data class Frame(

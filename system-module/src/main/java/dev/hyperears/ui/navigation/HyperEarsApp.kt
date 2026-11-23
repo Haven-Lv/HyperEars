@@ -63,6 +63,12 @@ fun HyperEarsApp(
     uiState: DashboardUiState,
     onRefresh: () -> Unit,
     onSetNoiseMode: (address: String, sessionToken: String, mode: NoiseMode) -> Unit,
+    onSetPeerConnection: (
+        address: String,
+        sessionToken: String,
+        mac: String,
+        connect: Boolean,
+    ) -> Unit,
     onDashboardVisibilityChanged: (Boolean) -> Unit,
     settings: ModuleSettings,
     autoCheckUpdates: Boolean,
@@ -123,6 +129,7 @@ fun HyperEarsApp(
                         uiState = uiState,
                         onRefresh = onRefresh,
                         onSetNoiseMode = onSetNoiseMode,
+                        onSetPeerConnection = onSetPeerConnection,
                         bottomContentPadding = bottomContentPadding,
                     )
                     TopLevelDestination.SETTINGS -> SettingsScreen(
@@ -158,6 +165,7 @@ fun HyperEarsApp(
                         uiState = uiState,
                         onRefresh = onRefresh,
                         onSetNoiseMode = onSetNoiseMode,
+                        onSetPeerConnection = onSetPeerConnection,
                         bottomContentPadding = bottomContentPadding,
                     )
                     TopLevelDestination.SETTINGS -> MiuixSettingsScreen(

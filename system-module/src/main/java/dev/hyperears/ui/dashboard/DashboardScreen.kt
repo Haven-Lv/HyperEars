@@ -57,6 +57,12 @@ fun DashboardScreen(
     uiState: DashboardUiState,
     onRefresh: () -> Unit,
     onSetNoiseMode: (address: String, sessionToken: String, mode: NoiseMode) -> Unit,
+    onSetPeerConnection: (
+        address: String,
+        sessionToken: String,
+        mac: String,
+        connect: Boolean,
+    ) -> Unit,
     bottomContentPadding: Dp = 0.dp,
 ) {
     HyperEarsPage(title = "HyperEars") { pagePadding, scrollBehavior ->
@@ -97,6 +103,14 @@ fun DashboardScreen(
                         session = session,
                         onSetNoiseMode = { mode ->
                             onSetNoiseMode(session.address, session.sessionToken, mode)
+                        },
+                        onSetPeerConnection = { mac, connect ->
+                            onSetPeerConnection(
+                                session.address,
+                                session.sessionToken,
+                                mac,
+                                connect,
+                            )
                         },
                     )
                 }
@@ -270,6 +284,7 @@ private fun EmptySessionsCard() {
 private fun DeviceSessionCard(
     session: DeviceSessionUiModel,
     onSetNoiseMode: (NoiseMode) -> Unit,
+    onSetPeerConnection: (String, Boolean) -> Unit,
     modifier: Modifier = Modifier,
 ) {
     Card(
@@ -342,7 +357,9 @@ private fun DeviceSessionCard(
             MetricStrip(
                 metrics = session.metrics,
                 noiseControl = session.noiseControl,
+                dualConnect = session.dualConnect,
                 onSetNoiseMode = onSetNoiseMode,
+                onSetPeerConnection = onSetPeerConnection,
             )
         }
     }
@@ -393,22 +410,120 @@ private fun SessionStatusList(
 private fun MetricStrip(
     metrics: List<DeviceMetric>,
     noiseControl: NoiseControlUiModel?,
+    dualConnect: DualConnectUiModel?,
     onSetNoiseMode: (NoiseMode) -> Unit,
+    onSetPeerConnection: (String, Boolean) -> Unit,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         metrics.forEach { metric ->
-            if (metric.kind == DeviceMetricKind.NOISE_MODE && noiseControl != null) {
-                NoiseModeMetric(
-                    metric = metric,
-                    control = noiseControl,
-                    onSetNoiseMode = onSetNoiseMode,
-                    modifier = Modifier.weight(1f),
+            when {
+                metric.kind == DeviceMetricKind.NOISE_MODE && noiseControl != null ->
+                    NoiseModeMetric(
+                        metric = metric,
+                        control = noiseControl,
+                        onSetNoiseMode = onSetNoiseMode,
+                        modifier = Modifier.weight(1f),
+                    )
+
+                metric.kind == DeviceMetricKind.DUAL_CONNECT && dualConnect != null ->
+                    DualConnectMetric(
+                        metric = metric,
+                        control = dualConnect,
+                        onSetPeerConnection = onSetPeerConnection,
+                        modifier = Modifier.weight(1f),
+                    )
+
+                else -> CompactMetric(metric.label, metric.value, Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+/**
+ * Peer roster entry point.
+ *
+ * The headset answers its own enumeration, so the list is always the vendor truth; the module
+ * only decides whether switching is currently allowed.
+ */
+@Composable
+private fun DualConnectMetric(
+    metric: DeviceMetric,
+    control: DualConnectUiModel,
+    onSetPeerConnection: (String, Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var expanded by rememberSaveable { mutableStateOf(false) }
+    val selectable = control.enabled
+
+    Box(modifier = modifier) {
+        Column(
+            modifier = Modifier
+                .fillMaxWidth()
+                .clickable(enabled = selectable) { expanded = true },
+            horizontalAlignment = Alignment.CenterHorizontally,
+            verticalArrangement = Arrangement.spacedBy(2.dp),
+        ) {
+            Row(verticalAlignment = Alignment.CenterVertically) {
+                Text(
+                    text = metric.value,
+                    style = MaterialTheme.typography.titleMedium,
+                    fontWeight = FontWeight.SemiBold,
+                    maxLines = 1,
                 )
-            } else {
-                CompactMetric(metric.label, metric.value, Modifier.weight(1f))
+                if (selectable) {
+                    Icon(
+                        imageVector = Icons.Default.ArrowDropDown,
+                        contentDescription = "切换设备",
+                        modifier = Modifier.size(18.dp),
+                        tint = MaterialTheme.colorScheme.onSurfaceVariant,
+                    )
+                }
+            }
+            Text(
+                text = metric.label,
+                style = MaterialTheme.typography.labelSmall,
+                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 1,
+            )
+        }
+        DropdownMenu(
+            expanded = expanded && selectable,
+            onDismissRequest = { expanded = false },
+        ) {
+            control.peers.forEach { peer ->
+                DropdownMenuItem(
+                    text = {
+                        Column {
+                            Text(peer.name.ifBlank { peer.mac })
+                            Text(
+                                text = when {
+                                    peer.playing -> "正在播放"
+                                    peer.connected -> "已连接"
+                                    else -> "未连接"
+                                },
+                                style = MaterialTheme.typography.labelSmall,
+                                color = MaterialTheme.colorScheme.onSurfaceVariant,
+                            )
+                        }
+                    },
+                    onClick = {
+                        expanded = false
+                        onSetPeerConnection(peer.mac, !peer.connected)
+                    },
+                    trailingIcon = if (peer.connected) {
+                        {
+                            Icon(
+                                imageVector = Icons.Default.Check,
+                                contentDescription = "当前连接",
+                            )
+                        }
+                    } else {
+                        null
+                    },
+                )
             }
         }
     }

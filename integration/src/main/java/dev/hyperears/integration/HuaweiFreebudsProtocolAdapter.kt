@@ -1,10 +1,13 @@
 package dev.hyperears.integration
 
 import dev.hyperears.protocol.huawei.HuaweiFreebudsSppCodec
+import dev.hyperears.protocol.huawei.HuaweiFreebudsSppCodec.DualConnectAction
 
 internal data class HuaweiProtocolProfile(
     val noiseModes: Set<NoiseMode>,
     val extension: HuaweiProtocolExtension? = null,
+    /** Whether this model answers the `2B 31` dual-connection roster. */
+    val dualConnect: Boolean = false,
 ) {
     val noiseTelemetryEnabled: Boolean get() = noiseModes.isNotEmpty()
 
@@ -54,22 +57,27 @@ internal abstract class HuaweiFreebudsProtocolAdapter(
     )
 
     override val featureStateContract: DeviceFeatureStateContract =
-        if (profile.extension != null) {
-            StandardDeviceFeatureStateContract.extending { _, state ->
-                profile.extension.acceptsState(state)
-            }
-        } else {
-            StandardDeviceFeatureStateContract
+        StandardDeviceFeatureStateContract.extending { _, state ->
+            (profile.extension?.acceptsState(state) == true) ||
+                (profile.dualConnect && state is HuaweiDualConnectFeatureState)
         }
 
     override val controlRequestContract: ControlRequestContract =
-        if (profile.extension != null) {
-            StandardControlRequestContract.extending { adapter, request ->
-                profile.extension.supportsRequest(adapter, request)
-            }
-        } else {
-            StandardControlRequestContract
+        StandardControlRequestContract.extending { adapter, request ->
+            (profile.extension?.supportsRequest(adapter, request) == true) ||
+                (
+                    profile.dualConnect &&
+                        request is HuaweiDualConnectRequest &&
+                        adapter.runtimeState().features.get<HuaweiDualConnectFeatureState>()
+                            ?.peers
+                            ?.any { it.mac.equals(request.peerMac(), ignoreCase = true) } == true
+                    )
         }
+
+    private fun HuaweiDualConnectRequest.peerMac(): String = when (this) {
+        is HuaweiDualConnectRequest.ConnectPeer -> mac
+        is HuaweiDualConnectRequest.DisconnectPeer -> mac
+    }
 
     override fun createProtocolSession(): ProtocolSession = HuaweiFreebudsProtocolSession(profile)
 
@@ -78,6 +86,12 @@ internal abstract class HuaweiFreebudsProtocolAdapter(
 
     override fun onInitialProtocolUnavailable(): InitialProtocolFailureResolution =
         InitialProtocolFailureResolution.KeepDormant
+
+    /** A lost channel invalidates the roster: the next session must re-enumerate. */
+    final override fun onProtocolReset() {
+        super.onProtocolReset()
+        removeFeatureState(HuaweiDualConnectFeatureState.FEATURE_ID)
+    }
 }
 
 /** HUAWEI FreeBuds 4 profile: channel 1 with ANC/off and no transparency or depth controls. */
@@ -112,7 +126,7 @@ internal class HuaweiFreeBuds4Adapter : HuaweiFreebudsProtocolAdapter(
 internal class HuaweiFreeClipAdapter : HuaweiFreebudsProtocolAdapter(
     endpointPrefix = "huawei-freeclip",
     channelNumbers = listOf(1),
-    profile = FREECLIP_PROFILE,
+    profile = FREECLIP_GEN1_PROFILE,
 ) {
     override val id: String = ID
     override val displayName: String = "HUAWEI FreeClip"
@@ -182,11 +196,17 @@ private class HuaweiFreebudsProtocolSession(
     private val decoder = HuaweiFreebudsSppCodec.Decoder()
     private var handshakePublished = false
     private var pendingNoiseRefresh = false
+    private var pendingDualConnectRefresh = false
+    private val dualConnectRecords = LinkedHashMap<String, HuaweiFreebudsSppCodec.DualConnectDevice>()
 
     override fun initialReadCommands(): List<ByteArray> = telemetryQueries()
 
     override fun encode(request: ControlRequest): List<ByteArray> = when (request) {
         StandardControlRequest.Refresh -> telemetryQueries()
+        is HuaweiDualConnectRequest.ConnectPeer ->
+            listOf(HuaweiFreebudsSppCodec.dualConnectCommand(DualConnectAction.CONNECT, request.mac))
+        is HuaweiDualConnectRequest.DisconnectPeer ->
+            listOf(HuaweiFreebudsSppCodec.dualConnectCommand(DualConnectAction.DISCONNECT, request.mac))
         is StandardControlRequest.SetNoiseMode ->
             request.mode
                 .takeIf(profile.noiseModes::contains)
@@ -202,6 +222,11 @@ private class HuaweiFreebudsProtocolSession(
             request.featureId == BatteryFeatureState.FEATURE_ID ->
                 listOf(HuaweiFreebudsSppCodec.queryBattery)
 
+            request.featureId == HuaweiDualConnectFeatureState.FEATURE_ID ->
+                listOf(HuaweiFreebudsSppCodec.queryDualConnectDevices)
+                    .takeIf { profile.dualConnect }
+                    .orEmpty()
+
             request.featureId == NoiseModeFeatureState.FEATURE_ID ||
                 request.featureId in profile.extension?.featureIds.orEmpty() ->
                 listOf(HuaweiFreebudsSppCodec.queryNoiseState)
@@ -213,6 +238,11 @@ private class HuaweiFreebudsProtocolSession(
     }
 
     override fun readback(request: ControlRequest): List<ByteArray> = when (request) {
+        is HuaweiDualConnectRequest ->
+            listOf(HuaweiFreebudsSppCodec.queryDualConnectDevices)
+                .takeIf { profile.dualConnect }
+                .orEmpty()
+
         is StandardControlRequest.SetNoiseMode ->
             listOf(HuaweiFreebudsSppCodec.queryNoiseState)
                 .takeIf { profile.noiseTelemetryEnabled }
@@ -221,15 +251,34 @@ private class HuaweiFreebudsProtocolSession(
         else -> profile.extension?.readback(request).orEmpty()
     }
 
-    override fun drainImmediateCommands(): List<ByteArray> {
-        if (!pendingNoiseRefresh) return emptyList()
-        pendingNoiseRefresh = false
-        return listOf(HuaweiFreebudsSppCodec.queryNoiseState)
+    override fun drainImmediateCommands(): List<ByteArray> = buildList {
+        if (pendingDualConnectRefresh) {
+            pendingDualConnectRefresh = false
+            add(HuaweiFreebudsSppCodec.queryDualConnectDevices)
+        }
+        if (pendingNoiseRefresh) {
+            pendingNoiseRefresh = false
+            add(HuaweiFreebudsSppCodec.queryNoiseState)
+        }
     }
 
     override fun offer(bytes: ByteArray): List<ProtocolEvent> = buildList {
         decoder.offer(bytes).forEach { frameBytes ->
             val frame = HuaweiFreebudsSppCodec.parseFrame(frameBytes) ?: return@forEach
+            if (profile.dualConnect) {
+                if (frame.command == HuaweiFreebudsSppCodec.CMD_DUAL_CONNECT_CHANGE_NOTIFY) {
+                    pendingDualConnectRefresh = true
+                    return@forEach
+                }
+                HuaweiFreebudsSppCodec.parseDualConnectFrame(frameBytes)?.let { record ->
+                    dualConnectRecords[record.mac] = record
+                    if (dualConnectRecords.size >= record.total || record.total <= 0) {
+                        publishDualConnectRoster(record.total)
+                    }
+                    return@forEach
+                }
+            }
+
             if (frame.command == HuaweiFreebudsSppCodec.CMD_NOISE_CHANGE_NOTIFY) {
                 if (profile.noiseTelemetryEnabled) pendingNoiseRefresh = true
                 return@forEach
@@ -281,11 +330,36 @@ private class HuaweiFreebudsProtocolSession(
         decoder.reset()
         handshakePublished = false
         pendingNoiseRefresh = false
+        pendingDualConnectRefresh = false
+        dualConnectRecords.clear()
+    }
+
+    /**
+     * Publishes the roster once every record announced by parameter 2 has arrived.
+     *
+     * The headset answers an enumeration with one frame per peer, so a partial list must never
+     * reach the UI: a stale roster would offer peers that are no longer paired.
+     */
+    private fun MutableList<ProtocolEvent>.publishDualConnectRoster(total: Int) {
+        val peers = dualConnectRecords.values
+            .sortedBy { it.index }
+            .map {
+                HuaweiDualConnectPeer(
+                    mac = it.mac,
+                    name = it.name,
+                    connected = it.connected,
+                    playing = it.playing,
+                    preferred = it.preferred,
+                )
+            }
+        dualConnectRecords.clear()
+        add(ProtocolEvent.FeatureStateChanged(HuaweiDualConnectFeatureState(peers)))
     }
 
     private fun telemetryQueries(): List<ByteArray> = buildList {
         add(HuaweiFreebudsSppCodec.queryBattery)
         if (profile.noiseTelemetryEnabled) add(HuaweiFreebudsSppCodec.queryNoiseState)
+        if (profile.dualConnect) add(HuaweiFreebudsSppCodec.queryDualConnectDevices)
     }
 
     private fun MutableList<ProtocolEvent>.publishHandshakeIfNeeded() {
@@ -316,6 +390,13 @@ private val HUAWEI_FAMILY_PROFILE = HuaweiProtocolProfile(
     noiseModes = setOf(NoiseMode.ANC, NoiseMode.OFF, NoiseMode.TRANSPARENCY),
 )
 
+/** FreeClip 2: battery only, no roster query. */
 private val FREECLIP_PROFILE = HuaweiProtocolProfile(
     noiseModes = emptySet(),
+)
+
+/** FreeClip (1st gen): battery only, plus the dual-connection roster it reports. */
+private val FREECLIP_GEN1_PROFILE = HuaweiProtocolProfile(
+    noiseModes = emptySet(),
+    dualConnect = true,
 )

@@ -57,6 +57,12 @@ fun MiuixDashboardScreen(
     uiState: DashboardUiState,
     onRefresh: () -> Unit,
     onSetNoiseMode: (address: String, sessionToken: String, mode: NoiseMode) -> Unit,
+    onSetPeerConnection: (
+        address: String,
+        sessionToken: String,
+        mac: String,
+        connect: Boolean,
+    ) -> Unit,
     bottomContentPadding: Dp = 0.dp,
 ) {
     MiuixHyperEarsPage(title = "HyperEars") { pagePadding, scrollBehavior ->
@@ -88,9 +94,20 @@ fun MiuixDashboardScreen(
                     items = uiState.deviceCards,
                     key = { session -> "${session.address}:${session.adapterId}" },
                 ) { session ->
-                    MiuixDeviceSessionCard(session) { mode ->
-                        onSetNoiseMode(session.address, session.sessionToken, mode)
-                    }
+                    MiuixDeviceSessionCard(
+                        session = session,
+                        onSetNoiseMode = { mode ->
+                            onSetNoiseMode(session.address, session.sessionToken, mode)
+                        },
+                        onSetPeerConnection = { mac, connect ->
+                            onSetPeerConnection(
+                                session.address,
+                                session.sessionToken,
+                                mac,
+                                connect,
+                            )
+                        },
+                    )
                 }
             }
         }
@@ -350,6 +367,7 @@ private fun MiuixEmptySessionsCard() {
 private fun MiuixDeviceSessionCard(
     session: DeviceSessionUiModel,
     onSetNoiseMode: (NoiseMode) -> Unit,
+    onSetPeerConnection: (String, Boolean) -> Unit,
 ) {
     Card(modifier = Modifier.fillMaxWidth()) {
         Column(
@@ -382,7 +400,13 @@ private fun MiuixDeviceSessionCard(
             MiuixSessionStatusList(session.headsetLifecycle)
             MiuixSectionLabel("MiLink 处理")
             MiuixLifecycleStrip(session.miLinkLifecycle)
-            MiuixMetricStrip(session.metrics, session.noiseControl, onSetNoiseMode)
+            MiuixMetricStrip(
+                metrics = session.metrics,
+                noiseControl = session.noiseControl,
+                dualConnect = session.dualConnect,
+                onSetNoiseMode = onSetNoiseMode,
+                onSetPeerConnection = onSetPeerConnection,
+            )
         }
     }
 }
@@ -534,22 +558,95 @@ private fun MiuixLifecycleStrip(stages: List<DeviceLifecycleStage>) {
 private fun MiuixMetricStrip(
     metrics: List<DeviceMetric>,
     noiseControl: NoiseControlUiModel?,
+    dualConnect: DualConnectUiModel?,
     onSetNoiseMode: (NoiseMode) -> Unit,
+    onSetPeerConnection: (String, Boolean) -> Unit,
 ) {
     Row(
         modifier = Modifier.fillMaxWidth(),
         horizontalArrangement = Arrangement.spacedBy(8.dp),
     ) {
         metrics.forEach { metric ->
-            if (metric.kind == DeviceMetricKind.NOISE_MODE && noiseControl != null) {
-                MiuixNoiseModeMetric(
-                    metric = metric,
-                    control = noiseControl,
-                    onSetNoiseMode = onSetNoiseMode,
-                    modifier = Modifier.weight(1f),
+            when {
+                metric.kind == DeviceMetricKind.NOISE_MODE && noiseControl != null ->
+                    MiuixNoiseModeMetric(
+                        metric = metric,
+                        control = noiseControl,
+                        onSetNoiseMode = onSetNoiseMode,
+                        modifier = Modifier.weight(1f),
+                    )
+
+                metric.kind == DeviceMetricKind.DUAL_CONNECT && dualConnect != null ->
+                    MiuixDualConnectMetric(
+                        metric = metric,
+                        control = dualConnect,
+                        onSetPeerConnection = onSetPeerConnection,
+                        modifier = Modifier.weight(1f),
+                    )
+
+                else -> MiuixCompactMetric(metric.label, metric.value, Modifier.weight(1f))
+            }
+        }
+    }
+}
+
+@Composable
+private fun MiuixDualConnectMetric(
+    metric: DeviceMetric,
+    control: DualConnectUiModel,
+    onSetPeerConnection: (String, Boolean) -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    var showDialog by rememberSaveable { mutableStateOf(false) }
+    val selectable = control.enabled
+    Column(
+        modifier = modifier.clickable(enabled = selectable) { showDialog = true },
+        horizontalAlignment = Alignment.CenterHorizontally,
+        verticalArrangement = Arrangement.spacedBy(2.dp),
+    ) {
+        Row(verticalAlignment = Alignment.CenterVertically) {
+            Text(
+                text = metric.value,
+                style = MiuixTheme.textStyles.headline2,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+            )
+            if (selectable) {
+                Icon(
+                    imageVector = Icons.Default.ArrowDropDown,
+                    contentDescription = "切换设备",
+                    modifier = Modifier.size(18.dp),
+                    tint = MiuixTheme.colorScheme.onSurfaceVariantActions,
                 )
-            } else {
-                MiuixCompactMetric(metric.label, metric.value, Modifier.weight(1f))
+            }
+        }
+        Text(
+            text = metric.label,
+            style = MiuixTheme.textStyles.footnote2,
+            color = MiuixTheme.colorScheme.onSurfaceVariantSummary,
+            maxLines = 1,
+        )
+    }
+    WindowDialog(
+        show = showDialog && selectable,
+        title = "连接设备",
+        onDismissRequest = { showDialog = false },
+    ) {
+        Column {
+            control.peers.forEach { peer ->
+                RadioButtonPreference(
+                    title = peer.name.ifBlank { peer.mac },
+                    summary = when {
+                        peer.playing -> "正在播放"
+                        peer.connected -> "已连接"
+                        else -> "未连接"
+                    },
+                    selected = peer.connected,
+                    onClick = {
+                        showDialog = false
+                        onSetPeerConnection(peer.mac, !peer.connected)
+                    },
+                )
             }
         }
     }

@@ -24,6 +24,8 @@ import dev.hyperears.bridge.ModuleContract
 import dev.hyperears.diagnostics.AppDiagnosticLog
 import dev.hyperears.diagnostics.DiagnosticLogExporter
 import dev.hyperears.integration.EarbudState
+import dev.hyperears.integration.HuaweiDualConnectFeatureState
+import dev.hyperears.integration.HuaweiDualConnectRequest
 import dev.hyperears.integration.ControlOwnership
 import dev.hyperears.integration.NoiseMode
 import dev.hyperears.integration.StandardControlRequest
@@ -223,6 +225,7 @@ class MainActivity : ComponentActivity() {
                             activeSessions.values.forEach(::sendRefreshControl)
                         },
                         onSetNoiseMode = ::sendNoiseModeControl,
+                        onSetPeerConnection = ::sendPeerConnectionControl,
                         onDashboardVisibilityChanged = ::onDashboardVisibilityChanged,
                         settings = currentSettings,
                         autoCheckUpdates = automaticUpdates,
@@ -288,6 +291,43 @@ class MainActivity : ComponentActivity() {
         if (!state.connected) return
         sendBroadcast(
             ModuleContract.control(StandardControlRequest.Refresh, address, sessionToken)
+                .addFlags(Intent.FLAG_RECEIVER_FOREGROUND),
+        )
+    }
+
+    /**
+     * Sends one dual-connection switch for a peer the headset itself reported.
+     *
+     * The roster is authoritative: a peer missing from it is rejected here, so a stale UI list can
+     * never turn into a write for a device that is no longer paired.
+     */
+    private fun sendPeerConnectionControl(
+        address: String,
+        sessionToken: String,
+        mac: String,
+        connect: Boolean,
+    ) {
+        val session = sessionCollection.value.sessions.values.firstOrNull { snapshot ->
+            snapshot.sessionToken == sessionToken &&
+                snapshot.state.address.equals(address, ignoreCase = true)
+        } ?: return
+        val state = session.state
+        val adapter = state.adapter ?: return
+        val roster = state.features.get<HuaweiDualConnectFeatureState>() ?: return
+        if (
+            !state.connected ||
+            state.lifecycle.controlOwnership != ControlOwnership.MODULE ||
+            roster.peers.none { it.mac.equals(mac, ignoreCase = true) }
+        ) {
+            return
+        }
+        val request = if (connect) {
+            HuaweiDualConnectRequest.ConnectPeer(mac)
+        } else {
+            HuaweiDualConnectRequest.DisconnectPeer(mac)
+        }
+        sendBroadcast(
+            ModuleContract.control(request, address, sessionToken)
                 .addFlags(Intent.FLAG_RECEIVER_FOREGROUND),
         )
     }

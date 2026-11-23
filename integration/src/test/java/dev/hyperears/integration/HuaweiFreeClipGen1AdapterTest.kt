@@ -44,16 +44,22 @@ class HuaweiFreeClipGen1AdapterTest {
     }
 
     @Test
-    fun handshakeAndRefreshSendOnlyTheBatteryQuery() {
+    fun handshakeSendsBatteryAndRosterQueriesOnly() {
         assertEquals(
-            listOf(HuaweiFreebudsSppCodec.queryBattery.toList()),
+            listOf(
+                HuaweiFreebudsSppCodec.queryBattery.toList(),
+                HuaweiFreebudsSppCodec.queryDualConnectDevices.toList(),
+            ),
             adapter.beginHandshake().commands.map(ByteArray::toList),
         )
 
         val refresh = adapter.executeControl(StandardControlRequest.Refresh)
         assertTrue(refresh.accepted)
         assertEquals(
-            listOf(HuaweiFreebudsSppCodec.queryBattery.toList()),
+            listOf(
+                HuaweiFreebudsSppCodec.queryBattery.toList(),
+                HuaweiFreebudsSppCodec.queryDualConnectDevices.toList(),
+            ),
             refresh.commands.map(ByteArray::toList),
         )
         assertTrue(adapter.queryState(NoiseModeFeatureState.FEATURE_ID).isEmpty())
