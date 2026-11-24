@@ -21,6 +21,47 @@ vivo / iQOO、OPPO Enco、OnePlus、Technics、Bose、Edifier、StarRing、ROSES
 > 更新可能暂时破坏兼容性。本项目与 Xiaomi、vivo、iQOO、OPPO、Bose、Edifier、
 > Panasonic、Technics、ROSESELSA、NiceHCK、水月雨、荣耀、华为、QCY、Dreame、TheAstro、Sony、Samsung 及相关品牌无关。
 
+## 本 Fork 的改动（Haven-Lv/HyperEars）
+
+> 本仓库是个人 Fork，基于上游 [silverpoetry/HyperEars](https://github.com/silverpoetry/HyperEars) v3.3.0，
+> 叠加了以下**未提交上游**的本地改动。上游版本请以 silverpoetry/HyperEars 为准。
+
+### 1. HUAWEI FreeClip（一代）精确适配
+
+- 固定 RFCOMM Channel 1，只读取左右耳与充电盒电量；
+- 不查询、不发布、不接受降噪/通透：该开放式夹耳型号没有对应硬件，固件对 `2B 04` 的
+  模式回显不作为能力证据；
+- 上游对应 PR：[silverpoetry/HyperEars#136](https://github.com/silverpoetry/HyperEars/pull/136)。
+
+### 2. 双连接设备切换（本 Fork 特有）
+
+- 主页设备卡片新增「设备」指标：显示当前已连接设备数（如 `2/4`），点开列出耳机通过
+  `2B 31` 上报的全部已配对设备及连接状态；
+- 点击未连接设备发送 `2B 33` 连接，点击已连接设备发送 `2B 33` 断开；收到 `2B 36`
+  变更事件后自动重新枚举；
+- 只对耳机上报列表中的 MAC 放行请求，列表未收满前不发布，避免陈旧列表写出无效命令；
+- 该能力属于上游 `docs/project-scope.md` 明确排除的“双设备管理”，因此仅在本 Fork 维护。
+
+### 已知限制与后续方向
+
+- **未完成（B 方案）**：把同一份设备列表迁移到 MiLink 原生耳机卡片，复用原生三态槽位并
+  绑定原生视图；需要新增 `MiLinkCardAdapter`、按 ROM 版本验证布局。当前仅在 HyperEars
+  主页卡片中提供，暂不计划实现。
+- 双连接切换要求 HyperEars 持有私有通道：智慧生活/智慧音频运行时按钮会置灰，需要开启
+  运行时退避或先退出厂商 App。
+- 仅 FreeClip 一代（Adapter ID `huawei-freeclip`）启用双连接；FreeClip 2 保持上游的
+  电量专用画像。
+
+### 安装与构建
+
+- 使用本仓库 Releases 中的包；它与官方 3.3.0 签名不同，安装前需先卸载官方版本，装完后
+  在 LSPosed 中重新勾选作用域并重启设备。
+- 构建要求与上游一致（JDK 17、Android SDK 37）：
+
+```bash
+./gradlew testDebugUnitTest :system-module:lintRelease :system-module:assembleRelease
+```
+
 ## 能做什么
 
 ### 系统集成
